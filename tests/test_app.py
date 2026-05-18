@@ -16,7 +16,6 @@ import pytest
 
 from app import app, url_store
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 @pytest.fixture

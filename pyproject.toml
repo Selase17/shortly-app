@@ -1,0 +1,14 @@
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+
+[tool.ruff.lint]
+# Enable a sensible default set of rules:
+#  E, W   — pycodestyle (PEP 8 style)
+#   F     — pyflakes (logical errors, unused imports)
+#   I     — isort (import ordering)
+#   B     — flake8-bugbear (common bugs)
+#   UP    — pyupgrade (modernise syntax)
+select = ["E", "W", "F", "I", "B", "UP"]
