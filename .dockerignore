@@ -1,0 +1,41 @@
+# ──────────────────────────────────────────────────────────
+# Files that should never enter the Docker build context.
+# Speeds builds up dramatically (no copying .venv etc.)
+# and prevents accidentally leaking secrets or junk into images.
+# ──────────────────────────────────────────────────────────
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Tests and dev deps — production image doesn't need them
+tests
+requirements-dev.txt
+pyproject.toml
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docker itself
+Dockerfile
+.dockerignore
+
+# Documentation that doesn't need to ship
+README.md
+LICENSE
+docs
