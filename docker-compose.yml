@@ -1,0 +1,102 @@
+
+# docker-compose.yml — local development orchestration for the shortly stack
+#
+# Run with:   docker compose up           (foreground, see logs)
+#             docker compose up -d        (background, detached)
+#             docker compose down         (stop and remove containers)
+#             docker compose logs -f      (tail logs of all services)
+#
+# Notes on the Compose specification:
+# – No "version:" key. The top-level version field was deprecated in 2023.
+#   Compose v2 (which you have) uses the latest schema by default.
+
+services:
+
+  # ── Application service ───────────────────────────────────────────
+  app:
+    # Build from the local Dockerfile rather than pulling a pre-built image.
+    # In production we'd pull a tagged image from a registry instead.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shortly:0.1.0           # name the built image consistently
+
+    container_name: shortly-app    # friendly name for `docker ps`
+
+    # Map host port 5000 to container port 5000.
+    # In dev we bind to localhost (127.0.0.1) so the service is NOT
+    # accessible from other machines on the network — defensive default.
+    ports:
+      - "127.0.0.1:5000:5000"
+
+    # Restart policy: bring the container back up if it crashes,
+    # but stop trying after manual `docker compose down`.
+    restart: unless-stopped
+
+    # Service dependencies. The app starts after redis is up.
+    # `depends_on` only waits for the container to start, NOT for the
+    # service inside it to be ready — for that we'd add a healthcheck
+    # condition (we will, once the app actually uses redis in Week 2).
+    depends_on:
+      - redis
+
+    # Custom healthcheck overriding the one in the Dockerfile.
+    # Compose-level healthchecks integrate with `depends_on` conditions
+    # and show up in `docker compose ps`.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+    # Apply Linux capability dropping — defence in depth.
+    # The container runs as non-root anyway (Dockerfile sets USER app),
+    # but explicitly stripping kernel capabilities reduces the blast
+    # radius if the process is ever compromised.
+    cap_drop:
+      - ALL
+
+    # Read-only root filesystem makes it harder for a compromised
+    # process to write malware or persistence artefacts onto disk.
+    # If we ever need a writable temp area, we'd add a tmpfs mount.
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # ── Cache / future state backend ──────────────────────────────────
+  # Redis is included now so the stack file is complete from day one.
+  # The app doesn't talk to it yet — that wiring happens in Week 2 when
+  # we replace the in-memory dict with a persistent backing store.
+  redis:
+    image: redis:7.4-alpine        # pinned minor, alpine for size
+    container_name: shortly-redis
+    restart: unless-stopped
+
+    # Redis listens on 6379 inside the container. We expose it to the
+    # host (localhost only) so we can poke it with `redis-cli` during dev.
+    # In production we wouldn't expose it at all — it'd only be reachable
+    # via the Docker network.
+    ports:
+      - "127.0.0.1:6379:6379"
+
+    # Persist data to a named volume so it survives container restarts.
+    volumes:
+      - redis_data:/data
+
+    # Native Redis healthcheck — pings the server, expects "PONG".
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+# ── Named volumes ───────────────────────────────────────────────────
+# Docker manages the lifecycle of named volumes (vs bind-mounts which
+# point at host paths). `docker compose down -v` removes them; plain
+# `docker compose down` preserves them.
+volumes:
+  redis_data:
+    driver: local
