@@ -12,9 +12,7 @@ Storage: in-memory dict for v0.1. Swapped for Redis in Week 2, DynamoDB in Week 
 import secrets
 import string
 from urllib.parse import urlparse
-
-from flask import Flask, jsonify, redirect, request, abort
-
+from flask import Flask, abort, jsonify, redirect, request
 
 app = Flask(__name__)
 
