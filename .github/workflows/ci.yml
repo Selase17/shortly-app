@@ -1,0 +1,85 @@
+
+# .github/workflows/ci.yml — Continuous Integration for shortly-app
+#
+# Triggered on every push to main and every pull request.
+# Two jobs run in parallel: lint and test.
+# Test job uses a Python version matrix to catch version-specific issues.
+#
+# Status badge in README links to the latest run on the default branch.
+
+name: CI
+
+# When this workflow runs ────────────────────────────────────────────
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual trigger button in the GitHub UI — useful for re-runs without
+  # creating a dummy commit. Costs nothing to enable.
+  workflow_dispatch:
+
+# Cancel any in-progress run when a new commit lands on the same ref.
+# Without this, every push triggers a fresh run and the previous one
+# keeps using minutes for no reason. Standard cost-saving pattern.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Lint job ───────────────────────────────────────────────────────
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5    # if it takes longer than 5 min something is wrong
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev dependencies
+        # Lint doesn't need the application's runtime deps, only the
+        # dev tooling. Slight time saver vs installing everything.
+        run: pip install -r requirements-dev.txt
+
+      - name: Run ruff
+        run: ruff check .
+
+  # ── Test job ───────────────────────────────────────────────────────
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Matrix: run the test suite against multiple Python versions.
+    # 3.12 is our primary (matches Dockerfile + dev machine).
+    # 3.11 catches issues with anything that requires 3.12+ syntax.
+    # 3.13 catches issues that would break us on the next major release.
+    strategy:
+      fail-fast: false    # if 3.11 fails, still run 3.12 and 3.13
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v
