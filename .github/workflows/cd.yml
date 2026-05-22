@@ -60,7 +60,7 @@ jobs:
       # CRITICAL vulnerabilities. This is the gate: a vulnerable image
       # never reaches Docker Hub.
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: shortly-app:scan-target
           format: table
