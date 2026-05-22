@@ -1,0 +1,96 @@
+
+# .github/workflows/cd.yml — Continuous Delivery for shortly-app
+#
+# Builds the Docker image, scans it for vulnerabilities with Trivy,
+# and (only if the scan passes) pushes it to Docker Hub.
+#
+# Runs only on push to main — not on PRs — because we don't want to
+# publish an image for every proposed change, only for merged code.
+#
+# Requires two repository secrets:
+#   DOCKERHUB_USERNAME  — your Docker Hub username (selase)
+#   DOCKERHUB_TOKEN     — a scoped Docker Hub access token (Read & Write)
+
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # allows manual trigger from the Actions tab in GitHub UI
+
+concurrency: # ensures only one CD workflow runs at a time for the main branch
+  group: cd-${{ github.ref }} #
+  cancel-in-progress: true
+
+jobs:
+  build-scan-push:
+    name: Build, Scan & Push
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Permissions: this job only needs to read the repo contents.
+    # Explicitly narrowing permissions is defence-in-depth — the default
+    # GITHUB_TOKEN has broader scope than we need here.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Set up Docker Buildx — the modern build engine that supports
+      # advanced caching and multi-platform builds.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Build the image LOCALLY first (load it into the runner's Docker)
+      # WITHOUT pushing. We scan it before it's allowed anywhere near
+      # the registry. "Scan, then push" — never "push, then scan".
+      - name: Build image (local, not pushed yet)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true                       # load into local docker, don't push
+          tags: shortly-app:scan-target
+          cache-from: type=gha             # use GitHub Actions cache
+          cache-to: type=gha,mode=max      # populate it for next run
+
+      # Scan the built image with Trivy. Fail the build on HIGH or
+      # CRITICAL vulnerabilities. This is the gate: a vulnerable image
+      # never reaches Docker Hub.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: shortly-app:scan-target
+          format: table
+          exit-code: 1                     # non-zero exit fails the job
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true             # don't fail on CVEs with no fix yet
+
+      # Only reached if Trivy passed. Now authenticate to Docker Hub.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Derive image tags: both :latest and the short git SHA, so every
+      # published image is traceable to the exact commit that built it.
+      - name: Set image tags
+        id: meta
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tags=${{ secrets.DOCKERHUB_USERNAME }}/shortly-app:latest,${{ secrets.DOCKERHUB_USERNAME }}/shortly-app:${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+      # Build again and push. Buildx cache makes this near-instant since
+      # the layers were just built in the scan step.
+      - name: Build and push to Docker Hub
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
