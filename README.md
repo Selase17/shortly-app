@@ -1,4 +1,4 @@
-# shortly-app
+<!-- # shortly-app
 A URL shortener service — first of three projects in a DevOps portfolio series. Python + Flask, ships with Docker, CI/CD, and security scanning.
 
 
@@ -6,7 +6,7 @@ A URL shortener service — first of three projects in a DevOps portfolio series
 
 
 [![CD](https://github.com/Selase17/shortly-app/actions/workflows/cd.yml/badge.svg)](https://github.com/Selase17/shortly-app/actions/workflows/cd.yml)
-[![Docker Hub](https://img.shields.io/docker/v/selase/shortly-app?label=docker%20hub&logo=docker)](https://hub.docker.com/r/selase/shortly-app)
+[![Docker Hub](https://img.shields.io/docker/v/selase/shortly-app?label=docker%20hub&logo=docker)](https://hub.docker.com/r/selase/shortly-app) -->
 
 
 # shortly-app
