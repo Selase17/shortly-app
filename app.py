@@ -4,43 +4,57 @@ shortly — a minimal URL shortener service.
 Endpoints:
   POST /shorten     Create a short code for a given URL.
   GET  /<code>      Redirect to the original URL for the given code.
-  GET  /healthz     Liveness probe — returns 200 if the service is up.
+  GET  /healthz     Liveness/readiness probe — checks Redis connectivity.
 
-Storage: in-memory dict for v0.1. Swapped for Redis in Week 2, DynamoDB in Week 4.
+Storage: Redis. Connection configured via environment variables so the same
+image runs unchanged in docker-compose, Kubernetes, or against a managed
+Redis — only the environment differs (12-Factor config principle).
 """
 
+import os
 import secrets
 import string
 from urllib.parse import urlparse
 
+import redis
 from flask import Flask, abort, jsonify, redirect, request
 
 app = Flask(__name__)
 
-# In-memory store: short_code -> long_url
-# This is fine for v0.1 because everything runs in a single Python process.
-# It does NOT survive restarts, and it does NOT scale beyond one process.
-# Both limitations are deliberate — we replace this with Redis (Week 2)
-# and DynamoDB (Week 4) as the project evolves.
-url_store: dict[str, str] = {}
+# ── Redis connection ─────────────────────────────────────────────────────
+# Config comes from the environment, never hardcoded. Defaults point at a
+# local Redis so `python app.py` works out of the box for a developer with
+# Redis on localhost; docker-compose and Kubernetes override these.
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
 
-# Short codes use lowercase letters + digits — URL-safe, no ambiguity (no 0/O confusion).
+# A single client instance reused across requests. redis-py maintains an
+# internal connection pool, so this is efficient — we do NOT open a new
+# connection per request. decode_responses=True means we get str back from
+# Redis instead of bytes, which keeps the rest of the code clean.
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    db=REDIS_DB,
+    decode_responses=True,
+    socket_connect_timeout=2,   # fail fast if Redis is unreachable
+    socket_timeout=2,
+)
+
+# Short codes use lowercase letters + digits — URL-safe, unambiguous.
 ALPHABET = string.ascii_lowercase + string.digits
-CODE_LENGTH = 6  # 36^6 = ~2.2 billion possible codes — plenty for a demo
+CODE_LENGTH = 6  # 36^6 ≈ 2.2 billion possible codes
 
 
 def generate_code() -> str:
-    """Generate a 6-character random short code using a cryptographically
-    secure RNG. secrets.choice is the right call here over random.choice
-    — it's slower but unpredictable, which matters even for a URL shortener
-    because guessable codes leak private links."""
+    """Generate a 6-char random short code using a cryptographically secure RNG.
+    secrets.choice over random.choice — guessable codes would leak private links."""
     return "".join(secrets.choice(ALPHABET) for _ in range(CODE_LENGTH))
 
 
 def is_valid_url(url: str) -> bool:
-    """Reject anything that isn't a plausible http(s) URL.
-    Real production validation is hard (IDN, punycode, private IPs, etc.) —
-    we keep this minimal and document it as a future hardening item."""
+    """Reject anything that isn't a plausible http(s) URL."""
     try:
         parsed = urlparse(url)
         return parsed.scheme in ("http", "https") and bool(parsed.netloc)
@@ -50,33 +64,43 @@ def is_valid_url(url: str) -> bool:
 
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    """Liveness probe. Kubernetes will call this — keep it cheap and side-effect-free."""
-    return jsonify(status="ok"), 200
+    """Health probe. Now that the app depends on Redis, 'healthy' means
+    'I can reach Redis' — otherwise the app can't do its job. Kubernetes will
+    call this; if it fails, the pod is restarted (liveness) or pulled from the
+    load balancer (readiness). We use one endpoint for both here for simplicity;
+    in a larger system you'd often split liveness (is the process alive?) from
+    readiness (can it serve traffic? i.e. are dependencies reachable?)."""
+    try:
+        redis_client.ping()
+        return jsonify(status="ok"), 200
+    except redis.RedisError:
+        # 503 Service Unavailable — the app is up but its dependency isn't.
+        return jsonify(status="degraded", reason="redis_unreachable"), 503
 
 
 @app.route("/shorten", methods=["POST"])
 def shorten():
     """Create a short code for a long URL.
-
-    Expected payload: JSON {"url": "https://example.com/some/long/path"}
-    Returns:          JSON {"short_code": "abc123", "short_url": "/abc123"}
-    """
+    Payload: {"url": "https://..."}  →  {"short_code","short_url","long_url"}"""
     payload = request.get_json(silent=True) or {}
     long_url = payload.get("url", "").strip()
 
     if not is_valid_url(long_url):
-        # 400 Bad Request — client sent us something we can't use.
         return jsonify(error="invalid_url",
                        message="Provide a valid http(s) URL"), 400
 
-    # Collision handling: regenerate if the code already exists.
-    # With 6 chars and 2.2B possible codes, collisions are astronomically rare
-    # at our scale — but defensively coding for them is cheap and correct.
-    code = generate_code()
-    while code in url_store:
+    try:
+        # Collision handling: SETNX ("set if not exists") is atomic — it only
+        # sets the key if it doesn't already exist, returning True/False. This
+        # avoids a race condition where two requests generate the same code
+        # between a separate "check then set". One atomic op, no race.
         code = generate_code()
-
-    url_store[code] = long_url
+        while not redis_client.set(code, long_url, nx=True):
+            code = generate_code()
+    except redis.RedisError:
+        # Redis unreachable mid-request → clean 503, not an unhandled 500.
+        return jsonify(error="storage_unavailable",
+                       message="Could not store URL, try again"), 503
 
     return jsonify(short_code=code,
                    short_url=f"/{code}",
@@ -86,12 +110,14 @@ def shorten():
 @app.route("/<code>", methods=["GET"])
 def redirect_to_long(code: str):
     """Look up the long URL for a short code and redirect to it."""
-    long_url = url_store.get(code)
+    try:
+        long_url = redis_client.get(code)
+    except redis.RedisError:
+        return jsonify(error="storage_unavailable",
+                       message="Could not look up URL, try again"), 503
+
     if long_url is None:
-        # 404 Not Found — no such code in the store.
         abort(404)
-    # 302 Found (default redirect). For permanent redirects in production
-    # you'd use 301, but 302 is correct for short links that might change.
     return redirect(long_url, code=302)
 
 
@@ -101,7 +127,7 @@ def not_found(_err):
 
 
 if __name__ == "__main__":
-    # Bind to 0.0.0.0 so the app is reachable from outside the container
-    # once we Dockerize in Week 2. host="127.0.0.1" would lock it to localhost.
-    # Debug mode is fine for local dev; we disable it in production.
+    # Bind to 0.0.0.0 so the app is reachable from outside the container.
+    # debug=True is for local dev only; production uses a real WSGI server
+    # with debug disabled (noted in the README hardening checklist).
     app.run(host="0.0.0.0", port=5000, debug=True)

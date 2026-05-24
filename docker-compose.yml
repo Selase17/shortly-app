@@ -19,19 +19,27 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: shortly:0.1.0           # name the built image consistently
+    image: shortly:0.2.0           # name the built image consistently
 
     container_name: shortly-app    # friendly name for `docker ps`
 
     # Map host port 5000 to container port 5000.
     # In dev we bind to localhost (127.0.0.1) so the service is NOT
     # accessible from other machines on the network — defensive default.
-    ports:
+    ports:  
       - "127.0.0.1:5000:5000"
 
     # Restart policy: bring the container back up if it crashes,
     # but stop trying after manual `docker compose down`.
     restart: unless-stopped
+
+    # Tell the app where Redis lives. In the Compose network, the Redis
+    # service is reachable by its service name "redis" — Docker's internal
+    # DNS resolves it to the container's IP. This is the 12-Factor config
+    # principle: same image, behaviour driven by environment.
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
 
     # Service dependencies. The app starts after redis is up.
     # `depends_on` only waits for the container to start, NOT for the
