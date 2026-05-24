@@ -1,34 +1,32 @@
-
 """
 Tests for the shortly URL shortener service.
 
-Uses Flask's built-in test client — no need to actually run the server.
-The test client makes in-process requests against the WSGI app directly,
-which is faster and more reliable than spinning up an HTTP server for tests.
+Uses fakeredis — an in-memory emulation of Redis — so tests are fast and need
+no running Redis instance. The operations the app relies on (SET with NX for
+atomic collision-safe writes, GET, PING) are faithfully emulated.
 
-Each test follows the AAA pattern:
-  Arrange  → set up inputs and state
-  Act      → call the endpoint under test
-  Assert   → verify the response is what we expected
+Each test gets a fresh fake Redis via the `client` fixture, so tests are
+isolated — one test's data never leaks into another.
 """
 
+import fakeredis
 import pytest
 
-from app import app, url_store
+import app as app_module
+from app import app
 
-# ── Fixtures ──────────────────────────────────────────────────────────────
 
 @pytest.fixture
-def client():
-    """A Flask test client with the URL store cleared before each test.
+def client(monkeypatch):
+    """A Flask test client backed by a fresh fakeredis instance.
 
-    Clearing the in-memory store between tests is important — without it,
-    test order would matter (one test's data would leak into the next),
-    and the suite would be flaky. The cleanup is the same principle as
-    `setUp` in unittest or `beforeEach` in JS test frameworks.
+    We patch the module-level `redis_client` so every Redis call the app makes
+    is routed to the in-memory fake. A new fake per test guarantees isolation.
     """
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(app_module, "redis_client", fake)
+
     app.config["TESTING"] = True
-    url_store.clear()
     with app.test_client() as test_client:
         yield test_client
 
@@ -36,10 +34,7 @@ def client():
 # ── /healthz tests ────────────────────────────────────────────────────────
 
 def test_healthz_returns_200(client):
-    """The liveness probe must be cheap, fast, and always return 200 when up.
-    Kubernetes relies on this — if /healthz ever returns non-200, the pod
-    gets killed and restarted. So this test guards a contract with our
-    future orchestration layer."""
+    """With Redis reachable (the fake always responds to ping), health is ok."""
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok"}
@@ -72,8 +67,7 @@ def test_shorten_missing_url_returns_400(client):
 
 
 def test_shorten_non_http_scheme_rejected(client):
-    """Only http(s) is accepted — protects against file://, ftp://, javascript:,
-    and other schemes that could be abused if we blindly redirected to them."""
+    """Only http(s) is accepted — protects against file://, ftp://, etc."""
     response = client.post("/shorten", json={"url": "ftp://example.com"})
     assert response.status_code == 400
 
@@ -82,33 +76,27 @@ def test_shorten_non_http_scheme_rejected(client):
 
 def test_redirect_to_long_url(client):
     """End-to-end: shorten a URL, then look up the code, verify redirect."""
-    # Arrange — create a short code first.
     create = client.post("/shorten", json={"url": "https://example.com/page"})
     code = create.get_json()["short_code"]
 
-    # Act — request the short code, but don't follow the redirect automatically
-    # (follow_redirects=False keeps the test focused on what *this* endpoint returns).
     response = client.get(f"/{code}", follow_redirects=False)
 
-    # Assert
     assert response.status_code == 302
     assert response.headers["Location"] == "https://example.com/page"
 
 
 def test_unknown_code_returns_404(client):
-    """Looking up a code that was never created should be a clean 404,
-    not an internal error."""
+    """Looking up a code that was never created should be a clean 404."""
     response = client.get("/zzzzzz")
     assert response.status_code == 404
     assert response.get_json()["error"] == "not_found"
 
 
-# ── Behavioural / integration tests ───────────────────────────────────────
+# ── Behavioural test ──────────────────────────────────────────────────────
 
 def test_two_shortens_produce_different_codes(client):
-    """Same input, called twice, should yield two distinct codes — proves
-    the generator is producing fresh codes and not caching by URL.
-    (If we later added URL deduplication, this test would change.)"""
+    """Same input, called twice, should yield two distinct codes — proves the
+    generator produces fresh codes and we're not caching by URL."""
     r1 = client.post("/shorten", json={"url": "https://example.com"})
     r2 = client.post("/shorten", json={"url": "https://example.com"})
     assert r1.get_json()["short_code"] != r2.get_json()["short_code"]
