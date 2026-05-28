@@ -25,7 +25,7 @@ security scanning, all built to production patterns.
 > **Portfolio series:** This is **Project A** of three. The same product is
 > shipped at progressively higher levels of engineering maturity:
 > **A — `shortly-app`** (this repo): the service, containerised, with full CI/CD.
-> **B — `shortly-k8s`** *(planned)*: deployed to Kubernetes with Helm and observability.
+> > **B — [shortly-k8s](https://github.com/Selase17/shortly-k8s):** Kubernetes deployment with Helm and Prometheus/Grafana observability.
 > **C — `shortly-infra`** *(planned)*: AWS infrastructure provisioned with Terraform.
 
 ---
